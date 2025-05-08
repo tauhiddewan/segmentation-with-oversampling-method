@@ -63,42 +63,12 @@ python build.py
 
 ## Model Training
 
-### 1. Benchmark Training
-Run the following command to get the benchmark score:
+Run the following command for training:
 
 ```bash
-python train.kfold.py
+python train.oversample.py
 ```
 
-### 2. Semi-Automatic Training
-Train the model using semi-automatic methods:
-
-```bash
-python train.semiauto.py
-```
-
-### 3. Semi-Automatic Training with Bad Samples
-Train the model while including bad samples:
-
-```bash
-python train.semiauto.bdex.py
-```
-
-### 4. Random Sample Training
-Train the model with randomly selected samples:
-
-```bash
-python train.random.py
-```
-
-
-
-## Killing Old Process and Restarting
-
-```bash
-#bash restart.sh <scriptname.py>
-bash restart.sh train.kfold.py
----
 
 ## Environment Variables
 

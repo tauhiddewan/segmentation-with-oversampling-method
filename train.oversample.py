@@ -28,7 +28,7 @@ from utils.misc import create_logger
 from utils.notification import send_notification
 from utils.build_train_test import get_binwise_data
 
-def get_binswise_ratios(model, n_bins, env_vars, data, device, score_threshold):
+def get_binswise_ratios(model_name, model, n_bins, env_vars, data, device, score_threshold):
     area_bins = np.linspace(0, 1, n_bins + 1)
     data_bins = get_binwise_data(data=data, 
                                  area_bins=area_bins, 
@@ -57,7 +57,11 @@ def get_binswise_ratios(model, n_bins, env_vars, data, device, score_threshold):
                 batched_image_tensor = image_tensor.unsqueeze(0).to(device)
 
                 preds = model(batched_image_tensor)
-                preds = preds.squeeze(0)
+
+                if model_name=="polyp_pvt":
+                    preds = preds[0].squeeze(0)
+                else:
+                    preds = preds.squeeze(0)
 
                 dice_score = calculate_dice_score(preds=preds, targets=mask_tensor, device=device, model_name=model_name)
                 score = dice_score.item()
@@ -70,14 +74,16 @@ def get_binswise_ratios(model, n_bins, env_vars, data, device, score_threshold):
  
     return binwise_ratios, oversample_pool
 
-def get_oversample_train_data(model, n_bins, env_vars, train_data, device, score_threshold, num_oversamples):
+def get_oversample_train_data(model_name, model, n_bins, env_vars, train_data, device, score_threshold, num_oversamples):
     oversampled_train_dataset = []
-    binwise_ratios, training_oversample_pool = get_binswise_ratios(model=model, 
-                                                                   n_bins=n_bins, 
-                                                                   env_vars=env_vars, 
-                                                                   data=train_data, 
-                                                                   device=device, 
-                                                                   score_threshold=score_threshold)
+    binwise_ratios, training_oversample_pool = get_binswise_ratios(
+        model_name=model_name,
+        model=model, 
+        n_bins=n_bins, 
+        env_vars=env_vars, 
+        data=train_data, 
+        device=device, 
+        score_threshold=score_threshold)
     
     for j in range(len(binwise_ratios)):
         if binwise_ratios[j] != 0:
@@ -205,32 +211,37 @@ def oversample_training(model_name,
         while patience>0:
             logger.warning(f"Iterative oversampling step: {x} ...")
             
-            oversampled_data = get_oversample_train_data(model=model, 
-                                                         n_bins=n_bins, 
-                                                         env_vars=env_vars, 
-                                                         train_data=train_data, 
-                                                         device=device,
-                                                         score_threshold=score_threshold,  
-                                                         num_oversamples=num_oversamples)
+            oversampled_data = get_oversample_train_data(
+                model_name=model_name, model=model, 
+                n_bins=n_bins, 
+                env_vars=env_vars, 
+                train_data=train_data, 
+                device=device,
+                score_threshold=score_threshold,  
+                num_oversamples=num_oversamples)
             
             train_data_oversampled = train_data + oversampled_data
             
             train_data_size_oversampled = len(train_data_oversampled)
         
-            train_dataset_oversampled = KvasirDataset(data=train_data_oversampled, 
-                                                      mode="train", 
-                                                      image_size=ast.literal_eval(env_vars["image_size"]), 
-                                                      mask_size=ast.literal_eval(env_vars["mask_size"]))
+            train_dataset_oversampled = KvasirDataset(
+                data=train_data_oversampled, 
+                mode="train", 
+                image_size=ast.literal_eval(env_vars["image_size"]), 
+                mask_size=ast.literal_eval(env_vars["mask_size"]))
             
-            train_dataloader_oversampled = DataLoader(train_dataset_oversampled, 
-                                                      batch_size=int(env_vars["batch_size"]), 
-                                                      shuffle=True, 
-                                                      num_workers=4)
+            train_dataloader_oversampled = DataLoader(
+                train_dataset_oversampled, 
+                batch_size=int(env_vars["batch_size"]), 
+                shuffle=True, 
+                num_workers=4)
             
             optimizer = torch.optim.AdamW(model.parameters(), lr=float(env_vars["learning_rate"]))
-            scheduler = get_lr_scheduler(optimizer=optimizer, 
-                                         num_epochs=int(env_vars["max_epochs"]), 
-                                         warmup_epochs=5)
+            scheduler = get_lr_scheduler(
+                optimizer=optimizer, 
+                num_epochs=int(env_vars["max_epochs"]), 
+                warmup_epochs=5)
+
             criterion = select_criterion(model_name=model_name)
             
 
@@ -302,15 +313,16 @@ def oversample_training(model_name,
         subject = "Training completed!"
         body = f"Hello.\n{socket.gethostname()} has finished the training process.\nPlease check the {results_fname} file attached with this email for details.\n\nThanks\ninfo.training.johnston"
         for receiver in receivers:
-            response = send_notification(subject=subject, 
-                                        body=body,
-                                        sender_email = str(env_vars["sender_email"]),
-                                        receiver_email = str(receiver),
-                                        smtp_server = str(env_vars["smtp_server"]),
-                                        smtp_port = int(env_vars["smtp_port"]),
-                                        password = str(env_vars["password"]),
-                                        results_fname=results_fname, 
-                                        results_fpath=f'{file_dir}/{model_name}_{model_config}.{env_vars["variant"]}.{results_fname}')
+            response = send_notification(
+                subject=subject, 
+                body=body,
+                sender_email = str(env_vars["sender_email"]),
+                receiver_email = str(receiver),
+                smtp_server = str(env_vars["smtp_server"]),
+                smtp_port = int(env_vars["smtp_port"]),
+                password = str(env_vars["password"]),
+                results_fname=results_fname, 
+                results_fpath=f'{file_dir}/{model_name}_{model_config}.{env_vars["variant"]}.{results_fname}')
             
             
             logger.info(f'{response} for {receiver}')
@@ -320,15 +332,16 @@ def oversample_training(model_name,
         subject = "Training incomplete!"
         body = f"Hello.\n{socket.gethostname()} couldn't finish the training process. Traceback for the error is following: \n{e}.\n\nThanks\ninfo.training.johnston"
         for receiver in receivers:
-            response = send_notification(subject=subject, 
-                                         body=body,
-                                         sender_email = str(env_vars["sender_email"]),
-                                         receiver_email = str(receiver),
-                                         smtp_server = str(env_vars["smtp_server"]),
-                                         smtp_port = int(env_vars["smtp_port"]),
-                                         password = str(env_vars["password"]),
-                                         results_fname=None, 
-                                         results_fpath=None)
+            response = send_notification(
+                subject=subject, 
+                body=body,
+                sender_email = str(env_vars["sender_email"]),
+                receiver_email = str(receiver),
+                smtp_server = str(env_vars["smtp_server"]),
+                smtp_port = int(env_vars["smtp_port"]),
+                password = str(env_vars["password"]),
+                results_fname=None, 
+                results_fpath=None)
             logger.exception(f'{response} to {receiver}')
     return logger, results
     
@@ -344,16 +357,18 @@ if __name__=="__main__":
     try:
         interrupted = False
         logger.warning("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< PROCESS STARTED >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-        logger, results = oversample_training(model_name=model_name, 
-                                              model_config=model_config,
-                                              env_vars=env_vars, 
-                                              logger=logger,
-                                              n_bins=int(env_vars["n_bins"]),
-                                              score_threshold=float(env_vars["score_threshold"]),
-                                              patience=int(env_vars["patience"]),
-                                              save_model=bool(env_vars["save_model"]),
-                                              load_ckpt=str(env_vars["load_ckpt"]),
-                                              file_dir=f'{env_vars["output_folder_path"]}/{env_vars["oversample_save_folder_name"]}/threshold_{float(env_vars["score_threshold"])}')
+        logger, results = oversample_training(
+            model_name=model_name, 
+            model_config=model_config,
+            env_vars=env_vars, 
+            logger=logger,
+            n_bins=int(env_vars["n_bins"]),
+            score_threshold=float(env_vars["score_threshold"]),
+            patience=int(env_vars["patience"]),
+            save_model=bool(env_vars["save_model"]),
+            load_ckpt=str(env_vars["load_ckpt"]),
+            file_dir=f'{env_vars["output_folder_path"]}/{env_vars["oversample_save_folder_name"]}/threshold_{float(env_vars["score_threshold"])}')
+
     except KeyboardInterrupt:
         interrupted = True
         logger.warning("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< PROCESS INTERRUPTED >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n")

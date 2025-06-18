@@ -16,19 +16,6 @@ from torch.optim.lr_scheduler import LinearLR, SequentialLR, CosineAnnealingLR
 from dotenv import dotenv_values
 from utils.metrics import calculate_dice_score, calculate_iou_score
 
-def set_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-def seed_worker(worker_id):
-    worker_seed = torch.initial_seed() % 2**32
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
-
 def training_step(dataloader, 
                   model, 
                   model_name,
@@ -44,12 +31,20 @@ def training_step(dataloader,
         images, labels = images.to(device), labels.to(device)
         
         logits = model(images)
-        batch_loss = criterion(logits, labels)
+        if model_name=="polyp_pvt":
+            batch_loss1 = criterion(logits[0], labels)
+            batch_loss2 = criterion(logits[1], labels)
+            batch_loss = batch_loss1 + batch_loss2 
+        else:
+            batch_loss = criterion(logits, labels)
         batch_loss.backward()
         optimizer.step()
-        
-        batch_dice_score = calculate_dice_score(preds=logits, targets=labels, device=device, model_name=model_name)
-        batch_iou_score = calculate_iou_score(preds=logits, targets=labels, device=device, model_name=model_name)
+        if model_name=="polyp_pvt":
+            batch_dice_score = calculate_dice_score(preds=logits[0], targets=labels, device=device, model_name=model_name)
+            batch_iou_score = calculate_iou_score(preds=logits[0], targets=labels, device=device, model_name=model_name)
+        else:
+            batch_dice_score = calculate_dice_score(preds=logits, targets=labels, device=device, model_name=model_name)
+            batch_iou_score = calculate_iou_score(preds=logits, targets=labels, device=device, model_name=model_name)
         
         total_loss += batch_loss.item()
         total_dice_score += batch_dice_score.item()
@@ -79,13 +74,12 @@ def check_stopping_conditions(epoch_loss_list,
 def training_loop(dataloader, 
                   model, 
                   model_name,
+                  train_data_size,
                   optimizer,
                   scheduler,
                   criterion,
                   device,
                   threshold, 
-                  train_subset_names,
-                  test_subset_names,
                   ma_window,
                   max_epochs, 
                   min_epochs, 
@@ -93,24 +87,26 @@ def training_loop(dataloader,
                   logger,
                   use_scheduler = False, 
                   save_model=True):
+    model.to(device)
     model.train()
     epoch_loss_list, ma_loss_list, epoch_dice_score_list, epoch_miou_score_list  = [], [], [], []
     min_loss = float('inf')
-    min_loss_score = 0
     best_model, best_optimizer = None, None
     epoch = 0
     
+    logger.info(f"Choosen train subset has: {train_data_size} data")
     logger.info(f'Training started...')
-    logger.info(f"Choosen Train subsets: {sorted(train_subset_names)}, Test subsets: {test_subset_names}")
     while True:
         model.train()
         epoch += 1
-        model, optimizer, mean_epoch_loss, mean_epoch_dice_score, mean_epoch_miou_score = training_step(dataloader=dataloader,
-                                                                                                        model=model, 
-                                                                                                        model_name=model_name, 
-                                                                                                        optimizer=optimizer, 
-                                                                                                        criterion=criterion, 
-                                                                                                        device=device)
+        model, optimizer, mean_epoch_loss, mean_epoch_dice_score, mean_epoch_miou_score = training_step(
+            dataloader=dataloader,
+            model=model, 
+            model_name=model_name, 
+            optimizer=optimizer, 
+            criterion=criterion, 
+            device=device)
+        
         epoch_loss_list.append(mean_epoch_loss)
         epoch_dice_score_list.append(mean_epoch_dice_score)
         epoch_miou_score_list.append(mean_epoch_miou_score)
@@ -126,15 +122,15 @@ def training_loop(dataloader,
             min_loss_miou_score = mean_epoch_miou_score
             min_loss = mean_epoch_loss
             best_model = copy.deepcopy(model)
-            best_optimizer = copy.deepcopy(optimizer)
+            best_optimizer = copy.deepcopy(optimizer)                   
                               
-                              
-        stopping = check_stopping_conditions(epoch_loss_list=epoch_loss_list,
-                                             current_loss=epoch_loss_list[-1],
-                                             current_ma_loss=ma_loss,
-                                             ma_window=ma_window, 
-                                             threshold=threshold, 
-                                             min_epochs=min_epochs) 
+        stopping = check_stopping_conditions(
+            epoch_loss_list=epoch_loss_list,
+            current_loss=epoch_loss_list[-1],
+            current_ma_loss=ma_loss,
+            ma_window=ma_window, 
+            threshold=threshold, 
+            min_epochs=min_epochs) 
         
         if stopping:
             logger.warning(f"Metrics converged and loss stabilized. Training stopped!")
@@ -150,10 +146,18 @@ def training_loop(dataloader,
         torch.save({
             'model_state_dict': best_model.state_dict(),
             'optimizer_state_dict': best_optimizer.state_dict()
-        }, best_model_save_path)
+        }, f'{best_model_save_path}.traindata_{train_data_size}.pt')
         logger.info(f"Best model found at Epoch: {best_model_epoch:04}. Loss: {min_loss:.4f}, Dice score: {min_loss_dice_score:.4f}, mIoU score: {min_loss_miou_score:.4f}")
     
     return best_model, epoch_loss_list, ma_loss_list, epoch_dice_score_list, epoch_miou_score_list
+
+def get_entropy(test_dice_scores):
+    bins = np.arange(0, 1.1, 0.1)
+    scores = np.array([score.cpu().item() if torch.is_tensor(score) else score for score in sorted(test_dice_scores)])
+    counts, _ = np.histogram(scores, bins=bins)
+    probabilities = counts / len(scores)
+    entropy = -np.sum(probabilities[probabilities > 0] * np.log(probabilities[probabilities > 0]))
+    return probabilities, entropy 
 
 
 def test_loop(model, 
@@ -166,26 +170,49 @@ def test_loop(model,
     final_test_loss, final_dice_score, final_miou_score = 0.0, 0.0, 0.0
     for _ in range(test_limit):
         model.eval()
+        all_test_dice_scores = []
         total_loss, total_dice_score, total_miou_score = 0.0, 0.0, 0.0
         with torch.no_grad():
             for batch in test_dataloader:
                 images, labels = batch
                 images, labels = images.to(device), labels.to(device)
                 logits = model(images)
-                loss = criterion(logits, labels)
+
+                if model_name=="polyp_pvt":
+                    batch_loss1 = criterion(logits[0], labels)
+                    batch_loss2 = criterion(logits[1], labels)
+                    loss = batch_loss1 + batch_loss2 
+        
+                    dice_score = calculate_dice_score(
+                        preds=logits[0], 
+                        targets=labels, 
+                        device=device, 
+                        model_name=model_name)
+                    iou_score = calculate_iou_score(
+                        preds=logits[0], 
+                        targets=labels, device=device, 
+                        model_name=model_name)
+                else:
+                    dice_score = calculate_dice_score(
+                        preds=logits, 
+                        targets=labels, 
+                        device=device, 
+                        model_name=model_name)
+                    iou_score = calculate_iou_score(
+                        preds=logits, 
+                        targets=labels, 
+                        device=device, 
+                        model_name=model_name)
+                    loss = criterion(logits, labels)
+    
                 
-                dice_score = calculate_dice_score(preds=logits,
-                                                  targets=labels, 
-                                                  device=device, 
-                                                  model_name=model_name)
-                iou_score = calculate_iou_score(preds=logits, 
-                                                targets=labels,
-                                                device=device, 
-                                                model_name=model_name)
+                all_test_dice_scores.append(dice_score)
                 
                 total_loss += loss.item()
                 total_dice_score += dice_score.item()
                 total_miou_score += iou_score.item()
+
+        # probabilities, entropy = get_entropy(test_dice_scores=all_test_dice_scores)
 
         mean_loss = total_loss / len(test_dataloader)
         mean_dice_score = total_dice_score / len(test_dataloader)
@@ -196,63 +223,7 @@ def test_loop(model,
     return final_test_loss/test_limit, final_dice_score/test_limit, final_miou_score/test_limit
 
 
-def get_name(subset_names):
-    subset_names.sort()
-    name = ""
-    for n in subset_names:
-        name += n
-    return name
 
-def get_remaining_subsets(dataset, training_subset_names):
-    rem_subsets, rem_subset_names = [], []
-    for key in dataset.keys():
-        if key not in training_subset_names:
-            rem_subsets.append(dataset[key])
-            rem_subset_names.append(key)
-    return rem_subsets, rem_subset_names
-
-
-def tensor_to_pil(tensor):
-    if tensor.ndimension() == 3: 
-        tensor = tensor.permute(1, 2, 0) 
-    array = tensor.numpy()
-    if array.dtype != 'uint8':
-        array = (array * 255).astype("uint8")
-    pil_img = Image.fromarray(array.squeeze())
-    return pil_img
-
-
-def generate_masks(model, 
-                   model_name,
-                   rem_dataset, 
-                   device):
-    model.eval() 
-    gen_dataset, real_masks, dice_scores = [], [], []
-    
-    with torch.no_grad(): 
-        for i in range(len(rem_dataset)):
-            image, label = rem_dataset[i]
-            # adding batch dim
-            image_batched = image.unsqueeze(0).to(device)
-            label_batched = label.unsqueeze(0).to(device)
-            
-            logits = model(image_batched) 
-            dice_score = calculate_dice_score(preds=logits, 
-                                              targets=label, 
-                                              device=device, 
-                                              model_name=model_name)
-            # Binary threshold after sigmoid
-            if model_name!="unet":
-                logits = torch.sigmoid(logits)
-            gen_mask_batched = (logits > 0.5).float() 
-            
-            # removing batch dim
-            gen_mask  = gen_mask_batched.squeeze(0).cpu()
-            
-            gen_dataset.append((image, gen_mask))
-            real_masks.append(label)
-            dice_scores.append((i, dice_score))
-    return gen_dataset, real_masks, dice_scores
 
 
 

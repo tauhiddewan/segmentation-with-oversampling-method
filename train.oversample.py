@@ -18,11 +18,7 @@ from sklearn.model_selection import train_test_split
 from utils.dataset import KvasirDataset
 from utils.build import create_fresh_directory
 from utils.train import (training_loop, 
-                         test_loop, 
-                         get_name, 
-                         get_remaining_subsets, 
-                         generate_masks, 
-                         set_seed, 
+                         test_loop,
                          get_lr_scheduler, 
                          cleanup_iteration)
 from utils.model import select_model
@@ -76,18 +72,12 @@ def get_binswise_ratios(model, n_bins, env_vars, data, device, score_threshold):
 
 def get_oversample_train_data(model, n_bins, env_vars, train_data, device, score_threshold, num_oversamples):
     oversampled_train_dataset = []
-    area_bins = np.linspace(0, 1, n_bins + 1)
-    data_bins = get_binwise_data(data=train_data, 
-                                 area_bins=area_bins, 
-                                 mask_size=ast.literal_eval(env_vars["mask_size"]))
-    
     binwise_ratios, training_oversample_pool = get_binswise_ratios(model=model, 
                                                                    n_bins=n_bins, 
                                                                    env_vars=env_vars, 
                                                                    data=train_data, 
                                                                    device=device, 
                                                                    score_threshold=score_threshold)
-    
     
     for j in range(len(binwise_ratios)):
         if binwise_ratios[j] != 0:
@@ -124,7 +114,7 @@ def oversample_training(model_name,
             data = pickle.load(f)
 
         train_data, test_data = data['train_data'], data['test_data']
-        print(len(train_data), len(test_data))
+        train_data_size_original = len(train_data)
         
         train_dataset = KvasirDataset(data=train_data, 
                                       mode="train", 
@@ -166,30 +156,32 @@ def oversample_training(model_name,
             checkpoint = torch.load(f'{env_vars["output_folder_path"]}/{env_vars["oversample_save_folder_name"]}/best_base_model.{model_name}_{model_config}.{env_vars["variant"]}.pt', weights_only=True)
             model.load_state_dict(checkpoint['model_state_dict'])
         else:
-            model, epoch_loss_list, ma_loss_list, epoch_dice_score_list, epoch_miou_score_list = training_loop(dataloader=train_dataloader,
-                                                                                                                model=model, 
-                                                                                                                model_name=model_name,
-                                                                                                                optimizer=optimizer,
-                                                                                                                scheduler=scheduler, 
-                                                                                                                criterion=criterion,
-                                                                                                                device=device,
-                                                                                                                threshold=float(env_vars["threshold"]),
-                                                                                                                train_subset_names=[],
-                                                                                                                test_subset_names=[],
-                                                                                                                ma_window=int(env_vars["ma_window"]),
-                                                                                                                max_epochs=int(env_vars["max_epochs"]), 
-                                                                                                                min_epochs=int(env_vars["min_epochs"]),
-                                                                                                                best_model_save_path=f'{models_dir}/pre_oversample.{model_name}_{model_config}.{env_vars["variant"]}.pt',
-                                                                                                                save_model=save_model,
-                                                                                                                logger=logger)
+            model, epoch_loss_list, ma_loss_list, epoch_dice_score_list, epoch_miou_score_list = training_loop(
+                dataloader=train_dataloader,
+                model=model, 
+                model_name=model_name,
+                train_data_size=train_data_size_original,
+                optimizer=optimizer,
+                scheduler=scheduler, 
+                criterion=criterion,
+                device=device,
+                threshold=float(env_vars["threshold"]),
+                ma_window=int(env_vars["ma_window"]),
+                max_epochs=int(env_vars["max_epochs"]), 
+                min_epochs=int(env_vars["min_epochs"]),
+                best_model_save_path=f'{models_dir}/pre_oversample.{model_name}_{model_config}.{env_vars["variant"]}.pt',
+                logger=logger,
+                save_model=save_model
+                )
                 
                 
-        test_loss, test_dice_score, test_miou_score = test_loop(model=model, 
-                                                                model_name=model_name,
-                                                                test_dataloader=test_dataloader, 
-                                                                criterion=criterion, 
-                                                                device=device,
-                                                                test_limit = int(env_vars["test_limit"]))
+        test_loss, test_dice_score, test_miou_score = test_loop(
+            model=model, 
+            model_name=model_name,
+            test_dataloader=test_dataloader, 
+            criterion=criterion, 
+            device=device,
+            test_limit = int(env_vars["test_limit"]))
                 
         
         logger.warning(f'Original Training Dataset size: {len(train_dataset)},  Test score: {test_dice_score:.4f}')
@@ -200,19 +192,11 @@ def oversample_training(model_name,
         
         results = {
             "overall": {
-                "original_training_size": len(train_data),
+                "original_training_size": train_data_size_original,
                 "initial_dice_score": test_dice_score,
                 "initial_iou_score": test_miou_score
                 }
 }
-                
-        #using the training set, get the scaling factors
-        # binwise_ratios, oversample_pool = get_binswise_ratios(model=model, 
-        #                                                       n_bins=n_bins, 
-        #                                                       env_vars=env_vars, 
-        #                                                       data=test_data, 
-        #                                                       device=device, 
-        #                                                       score_threshold=score_threshold)
         
         x = 1
         best_dice_score = test_dice_score
@@ -226,13 +210,12 @@ def oversample_training(model_name,
                                                          env_vars=env_vars, 
                                                          train_data=train_data, 
                                                          device=device,
-                                                         score_threshold=score_threshold, 
-                                                        #  binwise_ratios=binwise_ratios, 
+                                                         score_threshold=score_threshold,  
                                                          num_oversamples=num_oversamples)
             
             train_data_oversampled = train_data + oversampled_data
             
-            
+            train_data_size_oversampled = len(train_data_oversampled)
         
             train_dataset_oversampled = KvasirDataset(data=train_data_oversampled, 
                                                       mode="train", 
@@ -251,32 +234,32 @@ def oversample_training(model_name,
             criterion = select_criterion(model_name=model_name)
             
 
-            
-            
-            model, epoch_loss_list, ma_loss_list, epoch_dice_score_list, epoch_miou_score_list = training_loop(dataloader=train_dataloader_oversampled,
-                                                                                                               model=model, 
-                                                                                                               model_name=model_name,
-                                                                                                               optimizer=optimizer,
-                                                                                                               scheduler=scheduler, 
-                                                                                                               criterion=criterion,
-                                                                                                               device=device,
-                                                                                                               threshold=float(env_vars["threshold"]),
-                                                                                                               train_subset_names=[],
-                                                                                                               test_subset_names=[],
-                                                                                                               ma_window=int(env_vars["ma_window"]),
-                                                                                                               max_epochs=int(env_vars["max_epochs"]), 
-                                                                                                               min_epochs=int(env_vars["min_epochs"]),
-                                                                                                               best_model_save_path=f'{models_dir}/post_oversample.iter{x}.{model_name}_{model_config}.{env_vars["variant"]}.pt',
-                                                                                                               save_model=save_model,
-                                                                                                               logger=logger)
+            model, epoch_loss_list, ma_loss_list, epoch_dice_score_list, epoch_miou_score_list = training_loop(
+                dataloader=train_dataloader_oversampled,
+                model=model, 
+                model_name=model_name,
+                train_data_size=train_data_size_oversampled,
+                optimizer=optimizer,
+                scheduler=scheduler, 
+                criterion=criterion,
+                device=device,
+                threshold=float(env_vars["threshold"]),
+                ma_window=int(env_vars["ma_window"]),
+                max_epochs=int(env_vars["max_epochs"]), 
+                min_epochs=int(env_vars["min_epochs"]),
+                best_model_save_path=f'{models_dir}/post_oversample.iter{x}.{model_name}_{model_config}.{env_vars["variant"]}.pt',
+                logger=logger,
+                save_model=save_model,
+                )
                 
                 
-            ovtest_loss, ovtest_dice_score, ovitest_miou_score = test_loop(model=model, 
-                                                                           model_name=model_name,
-                                                                           test_dataloader=test_dataloader, 
-                                                                           criterion=criterion, 
-                                                                           device=device,
-                                                                           test_limit = int(env_vars["test_limit"]))
+            ovtest_loss, ovtest_dice_score, ovitest_miou_score = test_loop(
+                model=model, 
+                model_name=model_name,
+                test_dataloader=test_dataloader, 
+                criterion=criterion, 
+                device=device,
+                test_limit = int(env_vars["test_limit"]))
 
             logger.warning(f"Oversampled Training Dataset size : {len(train_data_oversampled)}, Test score: {ovtest_dice_score:.4f}")
             
@@ -301,7 +284,7 @@ def oversample_training(model_name,
             iteration_key = f'iter{x}'
             results["iterations"] = results.get("iterations", {})
             results["iterations"][iteration_key] = {
-                "training_size": len(train_data_oversampled),
+                "training_size": train_data_size_oversampled,
                 "dice_score": ovtest_dice_score,
                 "iou_score": ovitest_miou_score,
                 "num_oversamples": num_oversamples

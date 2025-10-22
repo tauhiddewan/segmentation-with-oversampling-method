@@ -120,10 +120,17 @@ class BinManager:
             # scale k linearly by difficulty relative to the hardest bin
             # ensure at least 1 if the bin has hard samples
             # never exceed what the pool can provide
-            k = int(round(num_oversamples * (r_tilde[j] / r_ref)))
-            k = max(1, k)
-            k = min(k, int(hards_per_bin[j]))
-            self.oversampled_data.extend(random.sample(oversample_pool[j], k=k))
+            k = max(1, int(round(num_oversamples * (r_tilde[j] / r_ref))))
+            
+            if not len(oversample_pool[j]):
+                continue
+
+            if k <= len(oversample_pool[j]):
+                picks = random.sample(oversample_pool[j], k=k)   # Enough samples, sample without replacement
+            else:
+                picks = random.choices(oversample_pool[j], k=k)  # Not enough sample, sample WITH replacement (duplicates allowed)
+
+            self.oversampled_data.extend(picks)
 
         return self.oversampled_data
 
@@ -171,9 +178,7 @@ class TrainingSession:
         self.folder_path = f'{self.env_vars.get("output_folder_path")}/{self.env_vars.get("oversample_save_folder_name")}'
         Path(self.folder_path).mkdir(parents=True, exist_ok=True)
 
-        self.best_model_path = (
-            f'{self.models_dir}/best_model.{self.model_name}_{self.model_config}.{self.env_vars["variant"]}.pt'
-        )
+        
 
     def __enter__(self):
         with open(f'{self.env_vars["data_folder_path"]}/{self.env_vars["split_fname"]}', "rb") as f:
@@ -229,8 +234,8 @@ class TrainingSession:
             save_model=self.save_model
         )
 
-        valid_loss, dice, iou = test_loop(
-            test_dataloader=self.valid_dataloader, 
+        test_loss, test_dice, test_iou = test_loop(
+            test_dataloader=self.test_dataloader, 
             model=self.model, 
             model_name=self.model_name, 
             criterion=self.criterion, 
@@ -239,17 +244,19 @@ class TrainingSession:
         )
         
         self.best_model = copy.deepcopy(base_model)
-        self.best_score = float(dice)
-        self.results["overall"]["initial_dice_score"] = float(dice)
-        self.results["overall"]["initial_iou_score"] = float(iou)
+        self.best_score = float(test_dice)
+        self.results["overall"]["initial_test_dice"] = float(test_dice)
+        self.results["overall"]["initial_test_iou"] = float(test_iou)
         self.logger.warning(
             f'Original Training size: {len(self.train_dataset)}, '
-            f'Validation Dice: {float(dice):.4f}, Validation IoU: {float(iou):.4f}'
+            f'Test Dice: {float(test_dice):.4f}, Test IoU: {float(test_iou):.4f}'
         )
 
     def oversample_step(self, score_threshold: float):
+        iter_idx = 0
         best_model_this_thr = None
         best_score_this_thr = None
+        best_iter_idx_this_thr = None
         per_bin_oversample = self.num_oversamples
         no_improve_streak = 0
         max_k = int(self.env_vars.get("max_per_bin_oversample", 50))
@@ -263,11 +270,17 @@ class TrainingSession:
         ov_model = copy.deepcopy(self.best_model).to(self.device)
         patience = int(self.env_vars.get("patience", 3))
         patience_left = patience
-        iter_idx = 0
+        
+        running_oversampled_data = []
+        max_total_oversamples = int(self.env_vars.get("max_total_oversamples", "1500"))
 
         while patience_left  > 0:
             iter_idx += 1
+            self.best_model_path = (
+                f'{self.models_dir}/best_model_{score_threshold}.{self.model_name}_{self.model_config}.{self.env_vars["variant"]}.pt'
+                )
 
+            
             oversampled_data  = BinManager(n_bins=self.n_bins, env_vars=self.env_vars).process(
                 train_data=self.train_core_data, 
                 model=ov_model, 
@@ -277,8 +290,18 @@ class TrainingSession:
                 num_oversamples=per_bin_oversample
             )
 
-            oversampled_training_data = list(self.train_core_data) + list(oversampled_data)
+            running_oversampled_data.extend(oversampled_data)
+            if len(running_oversampled_data) > max_total_oversamples:
+                running_oversampled_data = running_oversampled_data[-max_total_oversamples:]  # keep most recent
 
+            oversampled_training_data = list(self.train_core_data) + list(running_oversampled_data)
+
+            self.logger.warning(
+            f"[thr={score_threshold:.2f}] iter={iter_idx} | "
+            f"new_oversamples={len(oversampled_data)} | "
+            f"running_oversamples={len(running_oversampled_data)} | "
+            f"train_size={len(oversampled_training_data)}"
+        )
             ov_train_dataset = KvasirDataset(oversampled_training_data, "train", self.image_size, self.mask_size)
             ov_train_dataloader = DataLoader(ov_train_dataset, self.batch_size, shuffle=True, num_workers=4)
             
@@ -326,6 +349,7 @@ class TrainingSession:
             if (best_score_this_thr is None) or (ov_dice > best_score_this_thr):
                 best_score_this_thr  = ov_dice
                 best_model_this_thr = copy.deepcopy(ov_model)
+                best_iter_idx_this_thr = iter_idx
                 patience_left = patience
                 no_improve_streak = 0
 
@@ -361,21 +385,42 @@ class TrainingSession:
                 logger=self.logger,
                 wait_time=2
             )
-
-        thr_key = f"thr_{score_threshold:.2f}"
-        self.results.setdefault("threshold_bests", {})[thr_key] = {
-            "best_val_dice": float(best_score_this_thr) if best_score_this_thr is not None else None
-        }
-
             
         if best_model_this_thr is not None:
             # warm start at next threshold 
             self.best_model = copy.deepcopy(best_model_this_thr)
 
-            if (self.best_score is None) or (best_score_this_thr > self.best_score + 1e-6):
-                self.best_score = best_score_this_thr
+            
+            test_loss, test_dice, test_iou = test_loop(
+                test_dataloader=self.test_dataloader, 
+                model=best_model_this_thr, 
+                model_name=self.model_name, 
+                criterion=self.criterion, 
+                device=self.device, 
+                num_repeat=(self.num_repeat if self.num_repeat > 0 else None)
+            )
+            test_loss = float(test_loss)
+            test_dice = float(test_dice)
+            test_iou  = float(test_iou)
+
+            thr_key = f"thr_{score_threshold:.2f}"
+            self.results.setdefault("threshold_bests", {})[thr_key] = {
+                "best_val_dice": float(best_score_this_thr) if best_score_this_thr is not None else None,
+                "best_iter_index": int(best_iter_idx_this_thr) if best_iter_idx_this_thr is not None else None,
+                "test_loss": test_loss,
+                "test_dice": test_dice,
+                "test_iou":  test_iou,
+            }
+
+            if (self.best_score is None) or (test_dice > self.best_score + 1e-6):
+                self.best_score = test_dice
                 torch.save({'model_state_dict': self.best_model.state_dict()}, self.best_model_path)
-                self.logger.warning(f"Updated BEST OVERALL (val Dice={self.best_score:.4f})")
+                self.logger.warning(
+                    f"Updated BEST OVERALL (test Dice={self.best_score:.4f})"
+                    f"at {thr_key} (iter={best_iter_idx_this_thr})"
+                    )
+
+            
 
     def run_full_pipeline(self):
         self.base_train()
@@ -383,25 +428,12 @@ class TrainingSession:
         for thr in self.thresholds:
             self.oversample_step(score_threshold=thr)
 
-        final_model = copy.deepcopy(self.best_model if self.best_model is not None else self.model).to(self.device)
-
-        test_loss, test_dice, test_iou = test_loop(
-                test_dataloader=self.test_dataloader,
-                model=final_model,
-                model_name=self.model_name,
-                criterion=self.criterion,
-                device=self.device,
-                num_repeat=(self.num_repeat if self.num_repeat > 0 else None)
-            )
-
-        self.results["overall"]["final_test_loss"] = float(test_loss)
-        self.results["overall"]["final_test_dice"] = float(test_dice)
-        self.results["overall"]["final_test_iou"]  = float(test_iou)
+        final_test_dice = self.best_score if self.best_score is not None else -1.0
+        self.results["overall"]["final_test_dice"] = final_test_dice
 
         self.logger.warning(
-            f'Final TEST — Loss: {float(test_loss):.4f}, '
-            f'Dice: {float(test_dice):.4f}, IoU: {float(test_iou):.4f}'
-        )
+            f"Full pipeline finished. Best overall TEST Dice = {final_test_dice:.4f}"
+    )
     
     def __exit__(self, exc_type, exc, tb):
         try:

@@ -165,10 +165,10 @@ def test_loop(model,
               test_dataloader, 
               criterion, 
               device,
-              test_limit):
+              num_repeat):
     # ? TESTING THE DATASET `test_limit` TIMES AND TAKING AN AVARAGE FOR REDUCING RANDOMNESS
     final_test_loss, final_dice_score, final_miou_score = 0.0, 0.0, 0.0
-    for _ in range(test_limit):
+    for _ in range(num_repeat):
         model.eval()
         all_test_dice_scores = []
         total_loss, total_dice_score, total_miou_score = 0.0, 0.0, 0.0
@@ -220,7 +220,7 @@ def test_loop(model,
         final_test_loss += mean_loss
         final_dice_score += mean_dice_score
         final_miou_score += mean_miou_score
-    return final_test_loss/test_limit, final_dice_score/test_limit, final_miou_score/test_limit
+    return final_test_loss/num_repeat, final_dice_score/num_repeat, final_miou_score/num_repeat
 
 
 

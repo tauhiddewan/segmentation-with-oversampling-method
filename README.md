@@ -66,7 +66,7 @@ python build.py
 Run the following command for training:
 
 ```bash
-python train.oversample.py
+nohup python train.oversample.py > output.log 2>&1 &
 ```
 
 

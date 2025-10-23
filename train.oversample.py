@@ -34,6 +34,7 @@ from utils.train import (
 class BinManager:
     def __init__(self, n_bins, env_vars):
         self.area_bins = np.linspace(0, 1, n_bins+1)
+        self.env_vars = env_vars
 
         self.img_transform = transforms.Compose([
             transforms.Resize(

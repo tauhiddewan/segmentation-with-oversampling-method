@@ -13,7 +13,7 @@ from pathlib import Path
 from PIL import Image
 from dotenv import dotenv_values
 from typing import Optional, Any, Mapping
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 from torchvision import transforms
 from sklearn.model_selection import train_test_split
 from utils.dataset import KvasirDataset
@@ -24,6 +24,8 @@ from utils.metrics import calculate_dice_score
 from utils.misc import create_logger
 from utils.build_train_test import get_binwise_data
 from utils.notification import Notify
+from utils.tracker import ResultTracker  # uses set_pre, add_post_iter, set_post_threshold_test
+
 from utils.train import (
     training_loop, 
     test_loop,
@@ -41,14 +43,13 @@ class BinManager:
                 ast.literal_eval(env_vars.get("image_size")), 
                 transforms.InterpolationMode.BILINEAR),
             transforms.ToTensor(),
-            ])
+        ])
         self.msk_transform = transforms.Compose([
             transforms.Resize(
                 ast.literal_eval(env_vars.get("mask_size")), 
                 transforms.InterpolationMode.NEAREST),
             transforms.ToTensor()
-            ])
-
+        ])
 
     def process(self, train_data, model, model_name, device, score_threshold, num_oversamples):
         self.oversampled_data = []
@@ -63,10 +64,11 @@ class BinManager:
                     data_bins[j].append(data)
 
         data_bin_ratios = []
-        oversample_pool = [[] for j in range(len(data_bins))]
+        oversample_pool = [[] for _ in range(len(data_bins))]
 
         for idx, data_bin in enumerate(data_bins):
-            if len(data_bin)==0: data_bin_ratios.append(0)
+            if len(data_bin) == 0:
+                data_bin_ratios.append(0)
             else:
                 below = 0
                 for img, msk in data_bin:
@@ -77,7 +79,7 @@ class BinManager:
                     model.eval()
                     with torch.no_grad():
                         logits = model(img_tensor.unsqueeze(0).to(device))
-                        logits = logits[0].squeeze(0) if model_name=="polyp_pvt" else logits.squeeze(0)
+                        logits = logits[0].squeeze(0) if model_name == "polyp_pvt" else logits.squeeze(0)
                     if was_training:
                         model.train()
 
@@ -88,20 +90,11 @@ class BinManager:
                         model_name=model_name
                     ).item()
 
-                    if score<score_threshold:
+                    if score < score_threshold:
                         below += 1
                         oversample_pool[idx].append((img, msk))
 
-                data_bin_ratios.append(below/len(data_bin))
-
-
-        # for j in range(len(data_bin_ratios)):
-        #     if data_bin_ratios[j] != 0 and len(oversample_pool[j]) > 0:
-        #         k = min(num_oversamples, len(oversample_pool[j]))
-        #         self.oversampled_data.extend(random.sample(oversample_pool[j], k=k))
-
-        # return self.oversampled_data
-
+                data_bin_ratios.append(below / len(data_bin))
 
         # ---- Difficulty + Evidence weighting with budgeted allocation ----
         hards_per_bin = np.array([len(oversample_pool[j]) for j in range(len(data_bins))], dtype=float)
@@ -120,7 +113,7 @@ class BinManager:
 
         # weights
         w = np.zeros_like(p)
-        w[eligible] = (np.power(p[eligible], alpha) *np.power(hards_per_bin[eligible] + eps_m, beta))
+        w[eligible] = (np.power(p[eligible], alpha) * np.power(hards_per_bin[eligible] + eps_m, beta))
 
         if np.all(w == 0):
             return self.oversampled_data
@@ -164,8 +157,7 @@ class TrainingSession:
             model_config: str,
             logger: logging.Logger,
             file_dir: str | Path
-    ):
-        self.results = {}       
+    ):  
         self.env_vars = env_vars
         self.model_name = model_name
         self.model_config = model_config
@@ -179,7 +171,6 @@ class TrainingSession:
         # Training hyper-params
         self.best_model = None
         self.best_score = None
-        # self.load_ckpt = str(self.env_vars.get("load_ckpt", "False")) == "True"
         self.save_model = str(self.env_vars.get("save_model", "True")) == "True"
         self.n_bins = int(self.env_vars.get("n_bins", 20))
         self.num_repeat = int(self.env_vars.get("num_repeat", 1))  
@@ -197,8 +188,6 @@ class TrainingSession:
         self.folder_path = f'{self.env_vars.get("output_folder_path")}/{self.env_vars.get("oversample_save_folder_name")}'
         Path(self.folder_path).mkdir(parents=True, exist_ok=True)
 
-        
-
     def __enter__(self):
         with open(f'{self.env_vars["data_folder_path"]}/{self.env_vars["split_fname"]}', "rb") as f:
             data = pickle.load(f)
@@ -208,12 +197,11 @@ class TrainingSession:
 
         self.train_core_data, self.val_data = train_test_split(self.train_data, test_size=0.1, random_state=42)
 
-        self.train_dataset = KvasirDataset(self.train_core_data, "train", self.image_size, self.mask_size)
+        self.pre_os_train_dataset = KvasirDataset(self.train_core_data, "train", self.image_size, self.mask_size)
         self.valid_dataset = KvasirDataset(self.val_data, "test", self.image_size, self.mask_size)
         self.test_dataset = KvasirDataset(self.test_data, "test", self.image_size, self.mask_size)
 
-
-        self.train_dataloader = DataLoader(self.train_dataset, self.batch_size, shuffle=True, num_workers=4)
+        self.train_dataloader = DataLoader(self.pre_os_train_dataset, self.batch_size, shuffle=True, num_workers=4)
         self.valid_dataloader = DataLoader(self.valid_dataset, self.batch_size, shuffle=False, num_workers=4)
         self.test_dataloader = DataLoader(self.test_dataset, self.batch_size, shuffle=False, num_workers=4)
 
@@ -222,24 +210,23 @@ class TrainingSession:
         self.scheduler = get_lr_scheduler(self.optimizer, self.max_epochs, warmup_epochs=5) 
         self.criterion = select_criterion(self.model_name)
 
-        self.results = {
-            "overall": {
-                "original_training_size": len(self.train_dataset),
-            },
-            "iterations": {}
-        }
-
+        self.tracker = ResultTracker(
+            save_dir=self.file_dir,                         
+            model_name=self.model_name,
+            model_config=self.model_config,
+            variant=self.env_vars.get("variant")
+        )
         return self
 
-    def base_train(self):
+    def pre_oversample_train(self):
         pre_oversample_save_path = (
             f'{self.models_dir}/pre_oversample.{self.model_name}_{self.model_config}.{self.env_vars["variant"]}.pt'
         )
-        base_model, *_ = training_loop(
+        pre_os_model, *_ = training_loop(
             dataloader=self.train_dataloader,
             model=self.model,
             model_name=self.model_name,
-            train_data_size=len(self.train_dataset),
+            train_data_size=len(self.pre_os_train_dataset),
             optimizer=self.optimizer,
             scheduler=self.scheduler,
             criterion=self.criterion,
@@ -253,7 +240,7 @@ class TrainingSession:
             save_model=self.save_model
         )
 
-        test_loss, test_dice, test_iou = test_loop(
+        pre_os_test_loss, pre_os_test_dice, pre_os_test_iou = test_loop(
             test_dataloader=self.test_dataloader, 
             model=self.model, 
             model_name=self.model_name, 
@@ -262,16 +249,22 @@ class TrainingSession:
             num_repeat=(self.num_repeat if self.num_repeat > 0 else None)
         )
         
-        self.best_model = copy.deepcopy(base_model)
-        self.best_score = float(test_dice)
-        self.results["overall"]["initial_test_dice"] = float(test_dice)
-        self.results["overall"]["initial_test_iou"] = float(test_iou)
-        self.logger.warning(
-            f'Original Training size: {len(self.train_dataset)}, '
-            f'Test Dice: {float(test_dice):.4f}, Test IoU: {float(test_iou):.4f}'
+        self.best_model = copy.deepcopy(pre_os_model)
+        self.best_score = float(pre_os_test_dice)
+        
+        self.tracker.set_pre(
+            num_training_images=len(self.pre_os_train_dataset),
+            test_loss=float(pre_os_test_loss),
+            test_dice=float(pre_os_test_dice),
+            test_iou=float(pre_os_test_iou),
         )
 
-    def oversample_step(self, score_threshold: float):
+        self.logger.warning(
+            f'Original Training size: {len(self.pre_os_train_dataset)}, '
+            f'Test Dice: {float(pre_os_test_dice):.4f}, Test IoU: {float(pre_os_test_iou):.4f}'
+        )
+
+    def post_oversample_train(self, score_threshold: float):
         iter_idx = 0
         best_model_this_thr = None
         best_score_this_thr = None
@@ -286,54 +279,58 @@ class TrainingSession:
         )
 
         # Start from base model for this threshold
-        ov_model = copy.deepcopy(self.best_model).to(self.device)
+        post_os_model = copy.deepcopy(self.best_model).to(self.device)
         patience = int(self.env_vars.get("patience", 3))
         patience_left = patience
         
         running_oversampled_data = []
         max_total_oversamples = int(self.env_vars.get("max_total_oversamples", "1500"))
 
-        while patience_left  > 0:
+        while patience_left > 0:
             iter_idx += 1
             self.best_model_path = (
                 f'{self.models_dir}/best_model_{score_threshold}.{self.model_name}_{self.model_config}.{self.env_vars["variant"]}.pt'
-                )
+            )
 
-            
-            oversampled_data  = BinManager(n_bins=self.n_bins, env_vars=self.env_vars).process(
+            oversampled_data = BinManager(n_bins=self.n_bins, env_vars=self.env_vars).process(
                 train_data=self.train_core_data, 
-                model=ov_model, 
+                model=post_os_model, 
                 model_name=self.model_name, 
                 device=self.device, 
                 score_threshold=score_threshold, 
                 num_oversamples=per_bin_oversample
             )
-
             running_oversampled_data.extend(oversampled_data)
+
             if len(running_oversampled_data) > max_total_oversamples:
                 running_oversampled_data = running_oversampled_data[-max_total_oversamples:]  # keep most recent
 
-            oversampled_training_data = list(self.train_core_data) + list(running_oversampled_data)
+            oversampled_ds = KvasirDataset(
+                data=running_oversampled_data,
+                mode='oversample',
+                image_size=self.image_size,
+                mask_size=self.mask_size
+            )
+
+            post_os_train_dataset = ConcatDataset([self.pre_os_train_dataset, oversampled_ds])
+            post_os_train_dataloader = DataLoader(post_os_train_dataset, self.batch_size, shuffle=True, num_workers=4)
 
             self.logger.warning(
-            f"[thr={score_threshold:.2f}] iter={iter_idx} | "
-            f"new_oversamples={len(oversampled_data)} | "
-            f"running_oversamples={len(running_oversampled_data)} | "
-            f"train_size={len(oversampled_training_data)}"
-        )
-            ov_train_dataset = KvasirDataset(oversampled_training_data, "train", self.image_size, self.mask_size)
-            ov_train_dataloader = DataLoader(ov_train_dataset, self.batch_size, shuffle=True, num_workers=4)
+                f"[thr={score_threshold:.2f}] iter={iter_idx} | "
+                f"new_oversamples={len(oversampled_data)} | "
+                f"running_oversamples={len(running_oversampled_data)} | "
+                f"concat_train_size={len(post_os_train_dataset)}"
+            )
             
-            # Fresh optimizer/scheduler per iteration (as you intended)
-            optimizer = torch.optim.AdamW(ov_model.parameters(), lr=self.lr)
+            optimizer = torch.optim.AdamW(post_os_model.parameters(), lr=self.lr)
             scheduler = get_lr_scheduler(optimizer, self.max_epochs, warmup_epochs=5) 
             criterion = self.criterion
 
-            ov_model, *_ = training_loop(
-                dataloader=ov_train_dataloader,
-                model=ov_model,
+            post_os_model, *_ = training_loop(
+                dataloader=post_os_train_dataloader,
+                model=post_os_model,
                 model_name=self.model_name,
-                train_data_size=len(oversampled_training_data),
+                train_data_size=len(post_os_train_dataset),
                 optimizer=optimizer,
                 scheduler=scheduler,
                 criterion=criterion,
@@ -347,59 +344,56 @@ class TrainingSession:
                 save_model=self.save_model
             )
 
-            valid_loss, ov_dice, ov_iou = test_loop(
+            post_os_valid_loss, post_os_valid_dice, post_os_valid_iou = test_loop(
                 test_dataloader=self.valid_dataloader, 
-                model=ov_model, 
+                model=post_os_model, 
                 model_name=self.model_name, 
                 criterion=criterion, 
                 device=self.device, 
                 num_repeat=(self.num_repeat if self.num_repeat > 0 else None)
             )
 
-            ov_dice = float(ov_dice)
-            ov_iou = float(ov_iou)
+            post_os_valid_dice = float(post_os_valid_dice)
+            post_os_valid_iou = float(post_os_valid_iou)
+
+            # Save per-iter record under the threshold
+            self.tracker.add_post_iter(
+                thr=score_threshold,
+                iter_idx=iter_idx,
+                valid_loss=float(post_os_valid_loss),
+                valid_dice=float(post_os_valid_dice),
+                valid_iou=float(post_os_valid_iou),
+                new_oversamples=int(len(oversampled_data)),
+                running_oversamples=int(len(running_oversampled_data)),
+                train_size=int(len(post_os_train_dataset)),
+            )
 
             best_str = f"{best_score_this_thr:.3f}" if best_score_this_thr is not None else "None"
             self.logger.warning(
-                f"Oversampled Training size: {len(oversampled_training_data)}, "
-                f"Validation Dice: {ov_dice:.3f} (best this threshold: {best_str})"
+                f"Oversampled Training size: {len(post_os_train_dataset)}, "
+                f"Validation Dice: {post_os_valid_dice:.3f} (best this threshold: {best_str})"
             )
         
-            if (best_score_this_thr is None) or (ov_dice > best_score_this_thr):
-                best_score_this_thr  = ov_dice
-                best_model_this_thr = copy.deepcopy(ov_model)
+            if (best_score_this_thr is None) or (post_os_valid_dice > best_score_this_thr):
+                best_score_this_thr  = post_os_valid_dice
+                best_model_this_thr = copy.deepcopy(post_os_model)
                 best_iter_idx_this_thr = iter_idx
                 patience_left = patience
                 no_improve_streak = 0
-
             else:
                 no_improve_streak += 1
                 patience_left -= 1
-                if no_improve_streak == 1: 
-                    pass
-                elif no_improve_streak==2: 
+                if no_improve_streak == 2:
                     per_bin_oversample = min(int(per_bin_oversample * 1.5), max_k)
-                else: 
-                    pass
 
                 best_str = f"{best_score_this_thr:.4f}" if best_score_this_thr is not None else "-1.0"
                 self.logger.warning(
-                    f"Dice did not improve (current: {ov_dice:.4f}, best this threshold: {best_str}). "
+                    f"Validation Dice did not improve (current: {post_os_valid_dice:.4f}, best this threshold: {best_str}). "
                     f"Patience left: {patience_left}"
                 )
                 
-
-            iter_key = f'thr_{score_threshold:.3f}_iter_{iter_idx}'
-            self.results["iterations"][iter_key] = {
-                "training_size": len(oversampled_training_data),
-                "dice_score": ov_dice,
-                "iou_score": ov_iou,
-                "num_oversamples": per_bin_oversample,
-                "score_threshold": float(score_threshold),
-            }
-
             cleanup_iteration(
-                variables={'optimizer': optimizer, 'scheduler': scheduler, 'dataloader': ov_train_dataloader},
+                variables={'optimizer': optimizer, 'scheduler': scheduler, 'dataloader': post_os_train_dataloader},
                 device=self.device,
                 logger=self.logger,
                 wait_time=2
@@ -409,7 +403,6 @@ class TrainingSession:
             # warm start at next threshold 
             self.best_model = copy.deepcopy(best_model_this_thr)
 
-            
             test_loss, test_dice, test_iou = test_loop(
                 test_dataloader=self.test_dataloader, 
                 model=best_model_this_thr, 
@@ -422,54 +415,37 @@ class TrainingSession:
             test_dice = float(test_dice)
             test_iou  = float(test_iou)
 
-            thr_key = f"thr_{score_threshold:.2f}"
-            self.results.setdefault("threshold_bests", {})[thr_key] = {
-                "best_val_dice": float(best_score_this_thr) if best_score_this_thr is not None else None,
-                "best_iter_index": int(best_iter_idx_this_thr) if best_iter_idx_this_thr is not None else None,
-                "test_loss": test_loss,
-                "test_dice": test_dice,
-                "test_iou":  test_iou,
-            }
+            # Save per-threshold TEST metrics
+            self.tracker.set_post_threshold_test(
+                thr=float(score_threshold),
+                test_loss=float(test_loss),
+                test_dice=float(test_dice),
+                test_iou=float(test_iou),
+                best_iter_index=int(best_iter_idx_this_thr) if best_iter_idx_this_thr is not None else None,
+                best_val_dice=float(best_score_this_thr) if best_score_this_thr is not None else None,
+            )
+            
+            self.logger.warning(
+                f"Threshold={score_threshold:.2f} | Test Dice={test_dice:.4f}, Test IoU={test_iou:.4f} "
+                f"| (best_iter={best_iter_idx_this_thr})"
+            )
 
+            # Track global best (optional; no JSON write since your schema doesn't include overall best)
             if (self.best_score is None) or (test_dice > self.best_score + 1e-6):
                 self.best_score = test_dice
                 torch.save({'model_state_dict': self.best_model.state_dict()}, self.best_model_path)
                 self.logger.warning(
-                    f"Updated BEST OVERALL (test Dice={self.best_score:.4f})"
-                    f"at {thr_key} (iter={best_iter_idx_this_thr})"
-                    )
-
-            
+                    f"Updated BEST OVERALL (test Dice={self.best_score:.4f}) "
+                    f"at thr={score_threshold:.2f} (iter={best_iter_idx_this_thr})"
+                )
 
     def run_full_pipeline(self):
-        self.base_train()
-
+        self.pre_oversample_train()
         for thr in self.thresholds:
-            self.oversample_step(score_threshold=thr)
+            self.post_oversample_train(score_threshold=thr)
 
-        final_test_dice = self.best_score if self.best_score is not None else -1.0
-        self.results["overall"]["final_test_dice"] = final_test_dice
-
-        self.logger.warning(
-            f"Full pipeline finished. Best overall TEST Dice = {final_test_dice:.4f}"
-    )
-    
     def __exit__(self, exc_type, exc, tb):
         try:
-            try:
-                results_fname = f'{self.model_name}_{self.model_config}.{self.env_vars["variant"]}.results.json'
-                results_fpath = f'{self.file_dir}/{results_fname}'
-                Path(self.file_dir).mkdir(parents=True, exist_ok=True)
-
-                with open(results_fpath, 'w') as f:
-                    json.dump(self.results, f, indent=4)
-
-                if hasattr(self, "logger") and self.logger:
-                    self.logger.warning(f"Results written to: {results_fpath}")
-            except Exception as e:
-                if hasattr(self, "logger") and self.logger:
-                    self.logger.error(f"Failed to dump results on exit: {e}")
-
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             for h in getattr(self.logger, "handlers", []):
@@ -480,7 +456,6 @@ class TrainingSession:
         finally:
             return False
 
-                    
 
 if __name__=="__main__":
     interrupted = False
@@ -490,7 +465,6 @@ if __name__=="__main__":
     job_name = f"{model_name}_{model_config}.{env_vars['variant']}"
 
     file_dir = Path(env_vars["output_folder_path"]) / env_vars["oversample_save_folder_name"]
-
 
     logger = create_logger(
         log_filename=f'train.oversample.{job_name}', 
@@ -520,8 +494,3 @@ if __name__=="__main__":
                 logger.warning("<<<<<<<<<<<<<<<<<<<<  PROCESS ENDED  >>>>>>>>>>>>>>>>>>\n")
             for handler in logger.handlers:
                 handler.flush()
-
-
-
-
-

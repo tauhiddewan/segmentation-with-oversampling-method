@@ -183,7 +183,7 @@ class TrainingSession:
         self.image_size = ast.literal_eval(self.env_vars.get("image_size", "(384, 384)"))
         self.mask_size = ast.literal_eval(self.env_vars.get("mask_size", "(384, 384)"))
         self.batch_size = int(self.env_vars.get("batch_size", 12))
-        self.thresholds = [0.5, 0.6, 0.7, 0.8, 0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97]
+        self.thresholds = [0.6, 0.7, 0.8, 0.85, 0.90, 0.925, 0.94, 0.96, 0.97]
 
         self.folder_path = f'{self.env_vars.get("output_folder_path")}/{self.env_vars.get("oversample_save_folder_name")}'
         Path(self.folder_path).mkdir(parents=True, exist_ok=True)

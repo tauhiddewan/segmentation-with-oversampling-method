@@ -183,7 +183,11 @@ class TrainingSession:
         self.image_size = ast.literal_eval(self.env_vars.get("image_size", "(384, 384)"))
         self.mask_size = ast.literal_eval(self.env_vars.get("mask_size", "(384, 384)"))
         self.batch_size = int(self.env_vars.get("batch_size", 12))
-        self.thresholds = [0.6, 0.7, 0.8, 0.85, 0.90, 0.925, 0.94, 0.96, 0.97]
+
+
+        self.thresholds = ast.literal_eval(self.env_vars.get("thresholds", "[0.6, 0.7, 0.8, 0.85, 0.90, 0.925, 0.94, 0.96, 0.97]")) 
+
+        print(self.thresholds)
 
         self.folder_path = f'{self.env_vars.get("output_folder_path")}/{self.env_vars.get("oversample_save_folder_name")}'
         Path(self.folder_path).mkdir(parents=True, exist_ok=True)
@@ -442,7 +446,7 @@ class TrainingSession:
     def run_full_pipeline(self):
         self.pre_oversample_train()
         for thr in self.thresholds:
-            self.post_oversample_train(score_threshold=thr)
+            self.post_oversample_train(score_threshold=float(thr))
 
     def __exit__(self, exc_type, exc, tb):
         try:

@@ -4,5 +4,5 @@ __pycache__
 outputs
 results.json
 
-
+pre_*
 experiments/figs

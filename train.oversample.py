@@ -225,8 +225,10 @@ class TrainingSession:
 
     def pre_oversample_train(self):
         pretrained_save_path = (
-            f'pre_oversample.{self.model_name}_{self.model_config}.{self.env_vars["variant"]}.pt'
+            f'pre_oversample.{self.model_name}_{self.model_config}.{self.env_vars["variant"]}.'
+            f'traindata_{len(self.pre_os_train_dataset)}.pt'
         )
+
         new_training_save_path = (
             f'{self.models_dir}/pre_oversample.'
             f'{self.model_name}_{self.model_config}.{self.env_vars["variant"]}.pt'

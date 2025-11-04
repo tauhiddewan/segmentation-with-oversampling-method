@@ -23,7 +23,7 @@ sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "..")))
 
 from utils.dataset import KvasirDataset
 from utils.model import select_model
-from utils.visualization import (plot_training_results, 
+from utils.viz import (plot_training_results, 
                                  plot_test_results, 
                                  get_mask_quality_pct, 
                                  get_dataset, generate_mask, get_sas_modelwise_results, plot_modelwise_comparison)

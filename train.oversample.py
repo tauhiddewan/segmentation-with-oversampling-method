@@ -233,7 +233,7 @@ class TrainingSession:
             f'{self.models_dir}/pre_oversample.'
             f'{self.model_name}_{self.model_config}.{self.env_vars["variant"]}'
         )
-        
+
         if Path(pretrained_save_path).is_file():
             self.logger.info(f'Loading pre-oversample model from: {pretrained_save_path}')
             checkpoint = torch.load(pretrained_save_path, map_location=self.device)
@@ -262,6 +262,8 @@ class TrainingSession:
             torch.save({
                 'model_state_dict': pre_os_model.state_dict(),
             },f'{pretrained_save_path}')
+            
+        self.best_model = copy.deepcopy(pre_os_model).to(self.device)
 
 
     def post_oversample_train(self, score_threshold: float):

@@ -231,13 +231,14 @@ class TrainingSession:
 
         new_training_save_path = (
             f'{self.models_dir}/pre_oversample.'
-            f'{self.model_name}_{self.model_config}.{self.env_vars["variant"]}.pt'
+            f'{self.model_name}_{self.model_config}.{self.env_vars["variant"]}'
         )
-
+        
         if Path(pretrained_save_path).is_file():
             self.logger.info(f'Loading pre-oversample model from: {pretrained_save_path}')
             checkpoint = torch.load(pretrained_save_path, map_location=self.device)
-            pre_os_model = self.model.load_state_dict(checkpoint["state_dict"])
+            self.model.load_state_dict(checkpoint["model_state_dict"])
+            pre_os_model = self.model
         else:
             self.logger.info('Training pre-oversample model...')
             pre_os_model, *_ = training_loop(
@@ -258,35 +259,10 @@ class TrainingSession:
                 save_model=self.save_model
             )
             self.logger.info(f'Saving pre-oversample model to: {pretrained_save_path}')
-            torch.save(pre_os_model, pretrained_save_path)
+            torch.save({
+                'model_state_dict': pre_os_model.state_dict(),
+            },f'{pretrained_save_path}')
 
-        # --- Evaluate the model ---
-        pre_os_model.to(self.device)
-        pre_os_test_loss, pre_os_test_dice, pre_os_test_iou = test_loop(
-            test_dataloader=self.test_dataloader,
-            model=pre_os_model,
-            model_name=self.model_name,
-            criterion=self.criterion,
-            device=self.device,
-            num_repeat=(self.num_repeat if self.num_repeat > 0 else None)
-        )
-
-        # --- Update tracker and best model info ---
-        self.best_model = copy.deepcopy(pre_os_model)
-        self.best_score = float(pre_os_test_dice)
-
-        self.tracker.set_pre(
-            num_training_images=len(self.pre_os_train_dataset),
-            test_loss=float(pre_os_test_loss),
-            test_dice=float(pre_os_test_dice),
-            test_iou=float(pre_os_test_iou),
-        )
-
-        self.logger.warning(
-            f'Original Training size: {len(self.pre_os_train_dataset)}, '
-            f'Test Dice: {float(pre_os_test_dice):.4f}, '
-            f'Test IoU: {float(pre_os_test_iou):.4f}'
-        )
 
     def post_oversample_train(self, score_threshold: float):
         iter_idx = 0

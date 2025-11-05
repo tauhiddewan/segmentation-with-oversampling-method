@@ -1,7 +1,7 @@
 import os
 import gc
 import ast
-import json
+import math
 import copy
 import torch
 import socket
@@ -71,8 +71,7 @@ class TrainingSession:
         self.mask_size = ast.literal_eval(self.env_vars.get("mask_size", "(384, 384)"))
         self.batch_size = int(self.env_vars.get("batch_size", 12))
 
-        self.thresholds = ast.literal_eval(self.env_vars.get("thresholds", "[0.6, 0.7, 0.8, 0.85, 0.90, 0.925, 0.94, 0.96, 0.97]")) 
-        self.enable_thr_plots = str(self.env_vars.get("enable_thr_plots", "True")) == "True"
+        self.thresholds = ast.literal_eval(self.env_vars.get("thresholds", "[0.5, 0.4, 0.3, 0.2, 0.1]"))
 
         self.folder_path = f'{self.env_vars.get("output_folder_path")}/{self.env_vars.get("oversample_save_folder_name")}'
         Path(self.folder_path).mkdir(parents=True, exist_ok=True)
@@ -157,7 +156,7 @@ class TrainingSession:
         best_iter_idx_this_thr = None
         per_bin_oversample = self.num_oversamples
         no_improve_streak = 0
-        max_k = int(self.env_vars.get("max_per_bin_oversample", 50))
+        max_k = int(self.env_vars.get("max_per_bin_oversample", 80))
 
         self.logger.warning(f"Iterative oversampling step (thr={score_threshold})")
         post_oversample_save_path = (
@@ -171,8 +170,8 @@ class TrainingSession:
         patience_left = patience
         
         running_oversampled_data = []
-        max_total_oversamples = int(self.env_vars.get("max_total_oversamples", "1500"))
-
+        max_total_oversamples = int(float(self.env_vars.get("max_total_oversample_pct", 0.5)) * len(self.train_core_data)) ## 50% of training data 
+        
         while patience_left > 0:
             iter_idx += 1
             oversampled_data = BinManager(n_bins=self.n_bins, env_vars=self.env_vars).process(
@@ -263,11 +262,17 @@ class TrainingSession:
                 best_iter_idx_this_thr = iter_idx
                 patience_left = patience
                 no_improve_streak = 0
+
+            
             else:
                 no_improve_streak += 1
                 patience_left -= 1
+
                 if no_improve_streak == 2:
-                    per_bin_oversample = min(int(per_bin_oversample * 1.5), max_k)
+                    per_bin_oversample = min(max(1, math.ceil(per_bin_oversample * 1.5)), max_k)
+                elif no_improve_streak == 3:
+                    # total ~3x relative to original intent; if you want only 2x total, set 2.0/1.33 appropriately
+                    per_bin_oversample = min(max(1, math.ceil(per_bin_oversample * 2.0)), max_k)
 
                 best_str = f"{best_score_this_thr:.4f}" if best_score_this_thr is not None else "-1.0"
                 self.logger.warning(

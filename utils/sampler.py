@@ -23,7 +23,15 @@ class BinManager:
             transforms.ToTensor()
         ])
 
-    def process(self, train_data, model, model_name, device, score_threshold, num_oversamples):
+    def process(
+            self, 
+            train_data, 
+            model,
+            model_name, 
+            device, 
+            score_threshold, 
+            num_oversamples,
+            with_replacement=True):
         self.oversampled_data = []
         data_bins = [[] for _ in range(len(self.area_bins)-1)]
         for idx, data in enumerate(train_data):
@@ -68,54 +76,71 @@ class BinManager:
 
                 data_bin_ratios.append(below / len(data_bin))
 
-        # ---- Difficulty + Evidence weighting with budgeted allocation ----
-        hards_per_bin = np.array([len(oversample_pool[j]) for j in range(len(data_bins))], dtype=float)
-        imgs_per_bin  = np.array([len(data_bins[j]) for j in range(len(data_bins))], dtype=float)
-        eligible = hards_per_bin > 0
-        if not eligible.any():
-            return self.oversampled_data
-
-        # Jeffreys-smoothed ratio
-        p = (hards_per_bin + 0.5) / (imgs_per_bin + 1.0)
-
-        # knobs (safe defaults)
-        alpha = float(self.env_vars.get("oversample_alpha", 1.0))   # weight on ratio p
-        beta  = float(self.env_vars.get("oversample_beta",  0.5))   # weight on evidence m
-        eps_m = float(self.env_vars.get("oversample_eps_m", 0.5))   # small floor
-
-        # weights
-        w = np.zeros_like(p)
-        w[eligible] = (np.power(p[eligible], alpha) * np.power(hards_per_bin[eligible] + eps_m, beta))
-
-        if np.all(w == 0):
-            return self.oversampled_data
-
-        # total budget K for THIS call
-        K = max(1, int(num_oversamples * int(eligible.sum())))
-
-        # normalize to per-bin allocations
-        W = w.sum()
-        frac = w / W
-        k_per_bin = np.maximum(1, np.rint(K * frac)).astype(int)
-
-        # optional per-bin cap
-        k_max = int(self.env_vars.get("max_per_bin_oversample", 80))
-        k_per_bin = np.minimum(k_per_bin, k_max)
-
-        # sample from each bin with/without replacement
-        for j in range(len(data_bins)):
-            if not eligible[j]:
-                continue
-            pool = oversample_pool[j]
+        for j, pool in enumerate(oversample_pool):
             if not pool:
                 continue
 
-            k = int(k_per_bin[j])
-            if k <= len(pool):
-                picks = random.sample(pool, k=k)      # without replacement
+            k = int(num_oversamples)
+            if with_replacement:
+                picks = random.choices(pool, k=k)
             else:
-                picks = random.choices(pool, k=k)     # WITH replacement
+                k_eff = min(k, len(pool))
+                if k_eff <= 0:
+                    continue
+                picks = random.sample(pool, k=k_eff)
 
             self.oversampled_data.extend(picks)
 
         return self.oversampled_data
+
+        # # ---- Difficulty + Evidence weighting with budgeted allocation ----
+        # hards_per_bin = np.array([len(oversample_pool[j]) for j in range(len(data_bins))], dtype=float)
+        # imgs_per_bin  = np.array([len(data_bins[j]) for j in range(len(data_bins))], dtype=float)
+        # eligible = hards_per_bin > 0
+        # if not eligible.any():
+        #     return self.oversampled_data
+
+        # # Jeffreys-smoothed ratio
+        # p = (hards_per_bin + 0.5) / (imgs_per_bin + 1.0)
+
+        # # knobs (safe defaults)
+        # alpha = float(self.env_vars.get("oversample_alpha", 1.0))   # weight on ratio p
+        # beta  = float(self.env_vars.get("oversample_beta",  0.5))   # weight on evidence m
+        # eps_m = float(self.env_vars.get("oversample_eps_m", 0.5))   # small floor
+
+        # # weights
+        # w = np.zeros_like(p)
+        # w[eligible] = (np.power(p[eligible], alpha) * np.power(hards_per_bin[eligible] + eps_m, beta))
+
+        # if np.all(w == 0):
+        #     return self.oversampled_data
+
+        # # total budget K for THIS call
+        # K = max(1, int(num_oversamples * int(eligible.sum())))
+
+        # # normalize to per-bin allocations
+        # W = w.sum()
+        # frac = w / W
+        # k_per_bin = np.maximum(1, np.rint(K * frac)).astype(int)
+
+        # # optional per-bin cap
+        # k_max = int(self.env_vars.get("max_per_bin_oversample", 80))
+        # k_per_bin = np.minimum(k_per_bin, k_max)
+
+        # # sample from each bin with/without replacement
+        # for j in range(len(data_bins)):
+        #     if not eligible[j]:
+        #         continue
+        #     pool = oversample_pool[j]
+        #     if not pool:
+        #         continue
+
+        #     k = int(k_per_bin[j])
+        #     if k <= len(pool):
+        #         picks = random.sample(pool, k=k)      # without replacement
+        #     else:
+        #         picks = random.choices(pool, k=k)     # WITH replacement
+
+        #     self.oversampled_data.extend(picks)
+
+        # return self.oversampled_data

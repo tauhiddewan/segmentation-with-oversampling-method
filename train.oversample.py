@@ -144,6 +144,22 @@ class TrainingSession:
         # Best-so-far starts as the pre-oversample model
         self.best_model = copy.deepcopy(pre_os_model).to(self.device)
 
+        pre_os_test_loss, pre_os_test_dice, pre_os_test_iou = test_loop(
+                test_dataloader=self.test_dataloader, 
+                model=pre_os_model, 
+                model_name=self.model_name, 
+                criterion=self.criterion, 
+                device=self.device, 
+                num_repeat=(self.num_repeat if self.num_repeat > 0 else None)
+            )
+        
+        self.tracker.set_pre(
+            num_training_images=len(self.pre_os_train_dataset), 
+            test_loss=pre_os_test_loss, 
+            test_dice=pre_os_test_dice, 
+            test_iou=pre_os_test_iou
+        )
+
     def post_oversample_train(self, score_threshold: float):
         iter_idx = 0
         best_model_this_thr = None
